@@ -40,6 +40,8 @@ class DroneSimulator:
         self.path: list[Coordinate] | None = list(path)
         self._path_index = 0
         self.safe_stop = False
+        self.emergency_detected = False
+        self.safe_stop_reason: str | None = None
 
         for point in path:
             self._validate_coordinate(point, "Path coordinate")
@@ -102,9 +104,13 @@ class DroneSimulator:
     def replan(self, obstacles: Iterable[Coordinate]) -> list[Coordinate] | None:
         """Update dynamic obstacles and find a safe path from current position.
 
-        If the route is blocked or no safe route exists, the simulator
-        enters safe-stop state and will not continue along the old path.
+        If the drone's current position becomes blocked or no safe route
+        exists, the simulator enters safe-stop state.
         """
+        obstacle_set = set(obstacles)
+
+        self.emergency_detected = self.position in obstacle_set
+
         planner = DynamicReplanner(
             grid=self.static_grid,
             start=self.position,
@@ -113,13 +119,22 @@ class DroneSimulator:
 
         new_path = planner.update(
             current_position=self.position,
-            obstacles=obstacles,
+            obstacles=obstacle_set,
         )
 
         self.grid = planner.grid
         self.path = new_path
         self._path_index = 0
         self.safe_stop = planner.safe_stop
+
+        if self.emergency_detected:
+            self.safe_stop_reason = (
+                "Obstacle detected at drone's current position"
+            )
+        elif self.safe_stop:
+            self.safe_stop_reason = "No safe route available"
+        else:
+            self.safe_stop_reason = None
 
         return new_path
 
@@ -132,15 +147,17 @@ class DroneSimulator:
             return self.position
 
         next_position = self.path[self._path_index + 1]
+
         row, col = self.position
         next_row, next_col = next_position
 
         # Verify the next cell is still free.
         if self.grid[next_row][next_col] == 1:
             self.safe_stop = True
+            self.safe_stop_reason = "Next movement became unsafe"
             return self.position
 
-        # Prevent diagonal corner-cutting after a grid update.
+        # Prevent diagonal corner-cutting.
         if (
             next_row != row
             and next_col != col
@@ -150,6 +167,7 @@ class DroneSimulator:
             )
         ):
             self.safe_stop = True
+            self.safe_stop_reason = "Diagonal movement became unsafe"
             return self.position
 
         self.position = next_position
