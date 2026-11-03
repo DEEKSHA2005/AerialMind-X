@@ -29,6 +29,7 @@ class VideoFrameResult:
     obstacles: set[Coordinate]
     drone_position: Coordinate
     planned_path: list[Coordinate] | None
+    replanned: bool
     goal_reached: bool
     emergency_detected: bool
     safe_stop: bool
@@ -145,12 +146,12 @@ class VideoNavigationAgent:
 
         # Step 3: Check whether the obstacle configuration changed.
         changed = obstacles != self.previous_obstacles
+        replanned = False
 
         if changed and not self.simulator.reached_goal:
             # Step 4: Replan from the drone's current position.
             self.simulator.replan(obstacles)
-
-        self.previous_obstacles = obstacles.copy()
+            replanned = True
 
         # Step 5: Move the drone by one simulation step.
         if (
@@ -177,6 +178,7 @@ class VideoNavigationAgent:
                 if self.simulator.path is not None
                 else None
             ),
+            replanned=replanned,
             goal_reached=self.simulator.reached_goal,
             emergency_detected=self.simulator.emergency_detected,
             safe_stop=self.simulator.safe_stop,

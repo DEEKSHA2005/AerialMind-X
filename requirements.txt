@@ -8,3 +8,4 @@ torch
 torchvision
 pytest
 ruff
+streamlit-webrtc==0.79.0
