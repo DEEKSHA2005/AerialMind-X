@@ -1,6 +1,8 @@
 """AerialMind-X Streamlit application."""
 
+import tempfile
 import time
+from pathlib import Path
 
 import cv2
 import matplotlib.pyplot as plt
@@ -8,6 +10,7 @@ import numpy as np
 import streamlit as st
 
 from aerialmind.core.autonomous_agent import AutonomousAgent
+from aerialmind.core.video_navigation_agent import VideoNavigationAgent
 
 # --------------------------------------------------
 # Page Configuration
@@ -29,6 +32,15 @@ st.set_page_config(
 def load_agent(confidence, grid_size):
     """Load and cache the autonomous agent."""
     return AutonomousAgent(
+        confidence_threshold=confidence,
+        grid_rows=grid_size,
+        grid_cols=grid_size,
+    )
+
+@st.cache_resource
+def load_video_agent(confidence, grid_size):
+    """Load and cache the video navigation agent."""
+    return VideoNavigationAgent(
         confidence_threshold=confidence,
         grid_rows=grid_size,
         grid_cols=grid_size,
@@ -154,6 +166,7 @@ stop_mission = st.sidebar.button(
 # Input Section
 # --------------------------------------------------
 
+
 st.subheader("Visual Perception")
 
 uploaded_image = None
@@ -182,8 +195,8 @@ if input_mode == "Image":
 elif input_mode == "Video":
 
     st.info(
-        "Video-based sequential perception and replanning "
-        "will be integrated in the next stage."
+        "Upload a video to run sequential obstacle detection, "
+        "dynamic replanning and autonomous navigation."
     )
 
     uploaded_video = st.file_uploader(
@@ -214,6 +227,7 @@ elif input_mode == "Webcam":
         )
 
 
+
 # --------------------------------------------------
 # Mission Execution
 # --------------------------------------------------
@@ -227,10 +241,55 @@ if start_mission:
 
     st.session_state["mission_stopped"] = False
 
-    if input_mode != "Image":
-        st.warning(
-            "Autonomous execution is currently enabled for Image mode only."
-        )
+    if input_mode == "Video":
+
+        if uploaded_video is None:
+            st.warning("Please upload a video before starting the mission.")
+
+        else:
+            temp_video_path = None
+
+            try:
+                with st.spinner(
+                    "Processing video frames and performing autonomous navigation..."
+                ):
+                    video_agent = load_video_agent(confidence, grid_size)
+
+                    suffix = Path(uploaded_video.name).suffix or ".mp4"
+
+                    with tempfile.NamedTemporaryFile(
+                        delete=False,
+                        suffix=suffix,
+                    ) as temp_video:
+                        temp_video.write(uploaded_video.getvalue())
+                        temp_video_path = Path(temp_video.name)
+
+                    start_time = time.perf_counter()
+
+                    video_results = list(
+                        video_agent.process_video(temp_video_path)
+                    )
+
+                    execution_time = time.perf_counter() - start_time
+
+                    st.session_state["video_results"] = video_results
+                    st.session_state["video_execution_time"] = execution_time
+
+                if video_results:
+                    st.success(
+                        f"Video navigation completed. "
+                        f"{len(video_results)} frames processed."
+                    )
+                else:
+                    st.warning("No video frames were processed.")
+
+            except (FileNotFoundError, ValueError, RuntimeError, cv2.error) as error:
+                st.session_state.pop("video_results", None)
+                st.error(f"Video mission failed: {error}")
+
+            finally:
+                if temp_video_path is not None:
+                    temp_video_path.unlink(missing_ok=True)
 
     elif uploaded_image is None:
         st.warning("Please upload an image before starting the mission.")
@@ -278,9 +337,30 @@ if start_mission:
 # --------------------------------------------------
 
 result = st.session_state.get("agent_result")
+video_results = st.session_state.get("video_results", [])
 
 if st.session_state.get("mission_stopped", False):
     result = None
+    video_results = []
+
+# Aggregate detections across the COMPLETE video, not only the last frame.
+video_total_detections = sum(len(frame.detections) for frame in video_results)
+video_frames_with_detections = sum(
+    1 for frame in video_results if frame.detections
+)
+video_peak_detections = max(
+    (len(frame.detections) for frame in video_results),
+    default=0,
+)
+video_obstacle_cells = {
+    tuple(cell)
+    for frame in video_results
+    for cell in frame.obstacles
+}
+video_latest_detection_frame = next(
+    (frame for frame in reversed(video_results) if frame.detections),
+    video_results[-1] if video_results else None,
+)
 
 
 # --------------------------------------------------
@@ -290,7 +370,42 @@ if st.session_state.get("mission_stopped", False):
 st.divider()
 st.subheader("Mission Overview")
 
-if result is not None:
+if input_mode == "Video" and video_results:
+
+    latest_result = video_results[-1]
+
+    status = (
+        "Goal Reached"
+        if latest_result.goal_reached
+        else "Safe Stop"
+        if latest_result.safe_stop
+        else "In Progress"
+    )
+
+    route_updates = sum(
+        video_results[i].planned_path != video_results[i - 1].planned_path
+        for i in range(1, len(video_results))
+    )
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.metric("Agent Status", status)
+
+    with col2:
+        st.metric(
+            "Object Detection Events (All Frames)",
+            video_total_detections,
+        )
+
+    with col3:
+        st.metric("Route Updates", route_updates)
+
+    with col4:
+        progress = 100 if latest_result.goal_reached else 0
+        st.metric("Mission Progress", f"{progress}%")
+
+elif result is not None:
 
     status = (
         "Goal Reached"
@@ -315,12 +430,8 @@ if result is not None:
         st.metric("Route Updates", route_updates)
 
     with col4:
-        progress = (
-            100.0
-            if result.goal_reached
-            else 0.0
-        )
-        st.metric("Mission Progress", f"{progress:.0f}%")
+        progress = 100 if result.goal_reached else 0
+        st.metric("Mission Progress", f"{progress}%")
 
 else:
 
@@ -330,10 +441,10 @@ else:
         st.metric("Agent Status", "Standby")
 
     with col2:
-        st.metric("Detected Obstacles", "0")
+        st.metric("Detected Obstacles", 0)
 
     with col3:
-        st.metric("Route Updates", "0")
+        st.metric("Route Updates", 0)
 
     with col4:
         st.metric("Mission Progress", "0%")
@@ -358,6 +469,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 )
 
 
+
 # --------------------------------------------------
 # Tab 1 - Perception
 # --------------------------------------------------
@@ -366,44 +478,85 @@ with tab1:
 
     st.write("### Vision Perception")
 
-    if result is not None:
+    if input_mode == "Image":
 
-        st.image(
-            cv2.cvtColor(
-                result.annotated_image,
-                cv2.COLOR_BGR2RGB,
-            ),
-            caption="YOLO Obstacle Detection",
-            use_container_width=True,
-        )
+        if result is not None:
 
-        st.write("### Detection Details")
-
-        if result.detections:
-
-            detection_data = [
-                {
-                    "Object": detection.label,
-                    "Confidence": round(
-                        detection.confidence, 3
-                    ),
-                    "Bounding Box": str(
-                        detection.bounding_box
-                    ),
-                }
-                for detection in result.detections
-            ]
-
-            st.dataframe(
-                detection_data,
+            st.image(
+                cv2.cvtColor(
+                    result.annotated_image,
+                    cv2.COLOR_BGR2RGB,
+                ),
+                caption="YOLO Obstacle Detection",
                 use_container_width=True,
             )
 
+            if result.detections:
+                detection_data = [
+                    {
+                        "Object": d.label,
+                        "Confidence": round(d.confidence, 3),
+                        "Bounding Box": str(d.bounding_box),
+                    }
+                    for d in result.detections
+                ]
+
+                st.dataframe(detection_data, use_container_width=True)
+            else:
+                st.info("No objects detected.")
+
         else:
-            st.info("No objects detected.")
+            st.info("Upload an image and start an image mission.")
+
+    elif input_mode == "Video":
+
+        if video_results:
+
+            latest = video_results[-1]
+            display_frame = video_latest_detection_frame
+
+            st.image(
+                cv2.cvtColor(
+                    display_frame.annotated_frame,
+                    cv2.COLOR_BGR2RGB,
+                ),
+                caption=(
+                    f"Latest frame containing detections (frame "
+                    f"{display_frame.frame_index})"
+                    if display_frame.detections
+                    else "Latest Processed Video Frame"
+                ),
+                use_container_width=True,
+            )
+
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Frames Processed", len(video_results))
+            col2.metric("Frames With Detections", video_frames_with_detections)
+            col3.metric("Total Detection Events", video_total_detections)
+            col4.metric("Peak Objects In One Frame", video_peak_detections)
+
+            if display_frame.detections:
+                detection_data = [
+                    {
+                        "Object": d.label,
+                        "Confidence": round(d.confidence, 3),
+                        "Bounding Box": str(d.bounding_box),
+                    }
+                    for d in display_frame.detections
+                ]
+                st.write(f"Detections shown are from frame {display_frame.frame_index}.")
+                st.dataframe(detection_data, use_container_width=True)
+            else:
+                st.warning(
+                    "YOLO returned zero detections in every processed frame. "
+                    "The detection model/configuration must be checked."
+                )
+
+        else:
+            st.info("Upload a video and start a video mission.")
 
     else:
-        st.info("Start an image mission to view perception results.")
+        st.info("Autonomous webcam perception is not yet integrated.")
 
 
 # --------------------------------------------------
@@ -414,33 +567,49 @@ with tab2:
 
     st.write("### Agent Decision Log")
 
-    if result is not None:
+    if input_mode == "Image" and result is not None:
 
         st.success(result.decision)
 
-        st.write(
-            f"**Detected objects:** {len(result.detections)}"
-        )
+        st.write(f"**Detected objects:** {len(result.detections)}")
+        st.write(f"**Occupied grid cells:** {len(result.obstacles)}")
+        st.write(f"**Initial path cells:** {len(result.initial_path)}")
+        st.write(f"**Replanned path cells:** {len(result.planned_path)}")
+        st.write(f"**Final drone position:** {result.final_position}")
 
-        st.write(
-            f"**Occupied grid cells:** {len(result.obstacles)}"
-        )
+    elif input_mode == "Video" and video_results:
 
-        st.write(
-            f"**Initial path cells:** {len(result.initial_path)}"
-        )
+        latest = video_results[-1]
 
-        st.write(
-            "**Replanned path cells:** "
-            f"{len(result.planned_path) if result.planned_path else 0}"
-        )
+        if latest.goal_reached:
+            st.success("Navigation goal reached.")
+        elif latest.safe_stop:
+            st.warning("Agent entered safe-stop mode.")
+        else:
+            st.info("Agent is continuing simulated navigation.")
 
-        st.write(
-            f"**Final drone position:** {result.final_position}"
-        )
+        st.write(f"**Frames processed:** {len(video_results)}")
+        st.write(f"**Current drone position:** {latest.drone_position}")
+        st.write(f"**Detected objects in latest frame:** {len(latest.detections)}")
+        st.write(f"**Total detection events across video:** {video_total_detections}")
+        st.write(f"**Frames containing detections:** {video_frames_with_detections}")
+        st.write(f"**Grid cells marked as obstacles at any point:** {len(video_obstacle_cells)}")
+        st.write(f"**Current planned path cells:** {len(latest.planned_path)}")
+        st.write(f"**Goal reached:** {latest.goal_reached}")
+        st.write(f"**Emergency detected:** {latest.emergency_detected}")
+
+        st.write("### Recent Frame Decisions")
+
+        for frame in video_results[-5:]:
+            st.write(
+                f"Frame {frame.frame_index} | "
+                f"Position: {frame.drone_position} | "
+                f"Objects: {len(frame.detections)} | "
+                f"Safe stop: {frame.safe_stop}"
+            )
 
     else:
-        st.info("Agent decisions will appear after mission execution.")
+        st.info("Start an Image or Video mission to view agent decisions.")
 
 
 # --------------------------------------------------
@@ -451,13 +620,34 @@ with tab3:
 
     st.write("### Navigation Environment")
 
-    if result is not None:
+    if input_mode == "Image" and result is not None:
 
-        navigation_grid = np.zeros(
-            (grid_size, grid_size)
-        )
+        obstacles = result.obstacles
+        initial_path = result.initial_path
+        planned_path = result.planned_path
+        visited_positions = result.visited_positions
+        goal = result.goal
 
-        for row, col in result.obstacles:
+    elif input_mode == "Video" and video_results:
+
+        latest = video_results[-1]
+
+        obstacles = video_obstacle_cells
+        initial_path = []
+        planned_path = latest.planned_path
+        visited_positions = [
+            frame.drone_position for frame in video_results
+        ]
+        goal = None
+
+    else:
+        obstacles = None
+
+    if obstacles is not None:
+
+        navigation_grid = np.zeros((grid_size, grid_size))
+
+        for row, col in obstacles:
             navigation_grid[row, col] = 1
 
         fig, ax = plt.subplots(figsize=(9, 7))
@@ -468,66 +658,49 @@ with tab3:
             origin="upper",
         )
 
-        initial_rows = [point[0] for point in result.initial_path]
-        initial_cols = [point[1] for point in result.initial_path]
-
-        ax.plot(
-            initial_cols,
-            initial_rows,
-            "--",
-            label="Initial A* Path",
-            linewidth=2,
-        )
-
-        if result.planned_path:
-
-            planned_rows = [
-                point[0] for point in result.planned_path
-            ]
-
-            planned_cols = [
-                point[1] for point in result.planned_path
-            ]
-
+        if initial_path:
             ax.plot(
-                planned_cols,
-                planned_rows,
-                "-",
-                label="Replanned Path",
+                [p[1] for p in initial_path],
+                [p[0] for p in initial_path],
+                "--",
+                label="Initial A* Path",
                 linewidth=2,
             )
 
-        visited_rows = [
-            point[0] for point in result.visited_positions
-        ]
+        if planned_path:
+            ax.plot(
+                [p[1] for p in planned_path],
+                [p[0] for p in planned_path],
+                "-",
+                label="Current Planned Path",
+                linewidth=2,
+            )
 
-        visited_cols = [
-            point[1] for point in result.visited_positions
-        ]
+        if visited_positions:
+            ax.plot(
+                [p[1] for p in visited_positions],
+                [p[0] for p in visited_positions],
+                "o",
+                markersize=3,
+                label="Drone Trajectory",
+            )
 
-        ax.plot(
-            visited_cols,
-            visited_rows,
-            "o",
-            markersize=3,
-            label="Drone Trajectory",
-        )
+            ax.scatter(
+                visited_positions[0][1],
+                visited_positions[0][0],
+                marker="s",
+                s=100,
+                label="Start",
+            )
 
-        ax.scatter(
-            result.initial_path[0][1],
-            result.initial_path[0][0],
-            marker="s",
-            s=100,
-            label="Start",
-        )
-
-        ax.scatter(
-            result.goal[1],
-            result.goal[0],
-            marker="*",
-            s=180,
-            label="Goal",
-        )
+        if goal is not None:
+            ax.scatter(
+                goal[1],
+                goal[0],
+                marker="*",
+                s=180,
+                label="Goal",
+            )
 
         ax.set_title("AerialMind-X Navigation Grid")
         ax.set_xlabel("Grid Column")
@@ -539,7 +712,7 @@ with tab3:
         plt.close(fig)
 
     else:
-        st.info("Navigation visualization will appear after execution.")
+        st.info("Start an Image or Video mission to view navigation.")
 
 
 # --------------------------------------------------
@@ -550,32 +723,40 @@ with tab4:
 
     st.write("### Safety Monitoring")
 
-    if result is not None:
+    if input_mode == "Image" and result is not None:
 
-        if result.emergency_detected:
-            st.error("Emergency detected at the drone's current position.")
+        emergency = result.emergency_detected
+        safe_stop = result.safe_stop
+        reason = result.safe_stop_reason
 
-        elif result.safe_stop:
-            st.warning("Drone entered safe-stop mode.")
+    elif input_mode == "Video" and video_results:
+
+        latest = video_results[-1]
+
+        emergency = latest.emergency_detected
+        safe_stop = latest.safe_stop
+        reason = latest.safe_stop_reason
+
+    else:
+        emergency = None
+
+    if emergency is not None:
+
+        if emergency:
+            st.error("Emergency detected.")
+
+        elif safe_stop:
+            st.warning("Agent entered safe-stop mode.")
 
         else:
             st.success("No emergency detected. Safe-stop not activated.")
 
-        st.write(
-            f"**Emergency detected:** {result.emergency_detected}"
-        )
-
-        st.write(
-            f"**Safe stop:** {result.safe_stop}"
-        )
-
-        st.write(
-            f"**Safe-stop reason:** "
-            f"{result.safe_stop_reason or 'None'}"
-        )
+        st.write(f"**Emergency detected:** {emergency}")
+        st.write(f"**Safe stop:** {safe_stop}")
+        st.write(f"**Safe-stop reason:** {reason or 'None'}")
 
     else:
-        st.info("Safety information will appear after mission execution.")
+        st.info("Start an Image or Video mission to view safety information.")
 
 
 # --------------------------------------------------
@@ -586,38 +767,41 @@ with tab5:
 
     st.write("### Performance Evaluation")
 
-    if result is not None:
+    if input_mode == "Image" and result is not None:
+
+        execution_time = st.session_state.get("execution_time", 0.0)
+
+        st.metric("Execution Time", f"{execution_time:.3f} seconds")
+        st.metric("Initial Path Length", len(result.initial_path))
+        st.metric("Replanned Path Length", len(result.planned_path))
+        st.metric("Visited Positions", len(result.visited_positions))
+        st.metric("Goal Reached", "Yes" if result.goal_reached else "No")
+
+    elif input_mode == "Video" and video_results:
+
+        latest = video_results[-1]
 
         execution_time = st.session_state.get(
-            "execution_time", 0.0
+            "video_execution_time", 0.0
         )
 
+        route_updates = sum(
+            video_results[i].planned_path != video_results[i - 1].planned_path
+            for i in range(1, len(video_results))
+        )
+
+        st.metric("Execution Time", f"{execution_time:.3f} seconds")
+        st.metric("Frames Processed", len(video_results))
         st.metric(
-            "Execution Time",
-            f"{execution_time:.3f} seconds",
+            "Average Processing Time per Frame",
+            f"{execution_time / len(video_results):.4f} seconds",
         )
-
-        st.metric(
-            "Initial Path Length",
-            len(result.initial_path),
-        )
-
-        st.metric(
-            "Replanned Path Length",
-            len(result.planned_path)
-            if result.planned_path
-            else 0,
-        )
-
-        st.metric(
-            "Visited Positions",
-            len(result.visited_positions),
-        )
-
+        st.metric("Route Updates", route_updates)
+        st.metric("Latest Path Length", len(latest.planned_path))
         st.metric(
             "Goal Reached",
-            "Yes" if result.goal_reached else "No",
+            "Yes" if latest.goal_reached else "No",
         )
 
     else:
-        st.info("Performance metrics will appear after execution.")
+        st.info("Start an Image or Video mission to view performance metrics.")

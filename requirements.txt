@@ -1,7 +1,10 @@
 numpy
 opencv-python
 matplotlib
+pandas
+streamlit
+ultralytics
+torch
+torchvision
 pytest
 ruff
-ultralytics
-streamlit
