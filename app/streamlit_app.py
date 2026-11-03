@@ -8,9 +8,11 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import streamlit as st
+from streamlit_webrtc import webrtc_streamer
 
 from aerialmind.core.autonomous_agent import AutonomousAgent
 from aerialmind.core.video_navigation_agent import VideoNavigationAgent
+from aerialmind.core.webcam_navigation_processor import WebcamNavigationProcessor
 
 # --------------------------------------------------
 # Page Configuration
@@ -45,6 +47,92 @@ def load_video_agent(confidence, grid_size):
         grid_rows=grid_size,
         grid_cols=grid_size,
     )
+
+
+# --------------------------------------------------
+# Live Webcam Monitoring
+# --------------------------------------------------
+
+@st.fragment(run_every="1s")
+def render_webcam_monitor(webcam_ctx):
+
+    processor = webcam_ctx.video_processor
+
+    if processor is None:
+        st.info("Waiting for webcam connection...")
+        return
+
+    status = processor.get_status()
+
+    if status["error"]:
+        st.error(f"Webcam processing error: {status['error']}")
+        return
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric("Frames Processed", status["frame_index"])
+    col2.metric("Detected Objects", status["total_detections"])
+    col3.metric("Route Updates", status["route_updates"])
+    col4.metric(
+        "Average Processing Time",
+        f"{status['average_processing_time']:.3f} sec",
+    )
+
+    st.write(f"**Drone Position:** {status['drone_position']}")
+    st.write(f"**Goal Reached:** {status['goal_reached']}")
+    st.write(f"**Emergency Detected:** {status['emergency_detected']}")
+    st.write(f"**Safe Stop:** {status['safe_stop']}")
+
+    if status["safe_stop_reason"]:
+        st.warning(status["safe_stop_reason"])
+
+
+# --------------------------------------------------
+# Live Webcam Mission Overview
+# --------------------------------------------------
+
+@st.fragment(run_every="1s")
+def render_webcam_mission_overview(webcam_ctx):
+
+    processor = webcam_ctx.video_processor
+
+    if processor is None:
+        status = None
+    else:
+        status = processor.get_status()
+
+    if status is None:
+        agent_status = "Connecting"
+        detections = 0
+        route_updates = 0
+        progress = 0
+
+    else:
+        agent_status = (
+            "Goal Reached"
+            if status["goal_reached"]
+            else "Safe Stop"
+            if status["safe_stop"]
+            else "In Progress"
+        )
+
+        detections = status["total_detections"]
+        route_updates = status["route_updates"]
+        progress = 100 if status["goal_reached"] else 0
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.metric("Agent Status", agent_status)
+
+    with col2:
+        st.metric("Detected Objects", detections)
+
+    with col3:
+        st.metric("Route Updates", route_updates)
+
+    with col4:
+        st.metric("Mission Progress", f"{progress}%")
 
 
 # --------------------------------------------------
@@ -161,6 +249,18 @@ stop_mission = st.sidebar.button(
     use_container_width=True,
 )
 
+# Webcam mission state
+if "webcam_mission_active" not in st.session_state:
+    st.session_state["webcam_mission_active"] = False
+
+if stop_mission:
+    st.session_state["webcam_mission_active"] = False
+
+if start_mission:
+    st.session_state["webcam_mission_active"] = (
+        input_mode == "Webcam"
+    )
+
 
 # --------------------------------------------------
 # Input Section
@@ -211,20 +311,29 @@ elif input_mode == "Video":
 elif input_mode == "Webcam":
 
     st.info(
-        "Capture an environment image using your connected camera."
+        "Start the webcam mission to enable live obstacle detection "
+        "and autonomous navigation."
     )
 
-    camera_image = st.camera_input(
-        "Capture Environment",
-        key="webcam_input",
-    )
+    if st.session_state.get("webcam_mission_active", False):
 
-    if camera_image is not None:
-        st.image(
-            camera_image,
-            caption="Captured Camera Image",
-            use_container_width=True,
+        webcam_ctx = webrtc_streamer(
+            key="aerialmind_webcam",
+            video_processor_factory=lambda: WebcamNavigationProcessor(
+                confidence_threshold=confidence,
+                grid_size=grid_size,
+            ),
+            media_stream_constraints={
+                "video": True,
+                "audio": False,
+            },
+            async_processing=True,
         )
+
+        render_webcam_monitor(webcam_ctx)
+
+    else:
+        st.warning("Click Start Mission to activate live webcam navigation.")
 
 
 
@@ -290,6 +399,13 @@ if start_mission:
             finally:
                 if temp_video_path is not None:
                     temp_video_path.unlink(missing_ok=True)
+
+    elif input_mode == "Webcam":
+
+        st.success(
+            "Live webcam navigation activated. "
+            "Allow camera access in your browser."
+        )
 
     elif uploaded_image is None:
         st.warning("Please upload an image before starting the mission.")
@@ -383,8 +499,7 @@ if input_mode == "Video" and video_results:
     )
 
     route_updates = sum(
-        video_results[i].planned_path != video_results[i - 1].planned_path
-        for i in range(1, len(video_results))
+        1 for result in video_results if result.replanned
     )
 
     col1, col2, col3, col4 = st.columns(4)
@@ -404,6 +519,13 @@ if input_mode == "Video" and video_results:
     with col4:
         progress = 100 if latest_result.goal_reached else 0
         st.metric("Mission Progress", f"{progress}%")
+
+elif (
+    input_mode == "Webcam"
+    and st.session_state.get("webcam_mission_active", False)
+):
+
+    render_webcam_mission_overview(webcam_ctx)
 
 elif result is not None:
 
@@ -470,6 +592,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 
 
 
+
 # --------------------------------------------------
 # Tab 1 - Perception
 # --------------------------------------------------
@@ -478,85 +601,152 @@ with tab1:
 
     st.write("### Vision Perception")
 
-    if input_mode == "Image":
+    if input_mode == "Image" and result is not None:
 
-        if result is not None:
+        st.image(
+            cv2.cvtColor(
+                result.annotated_image,
+                cv2.COLOR_BGR2RGB,
+            ),
+            caption="YOLO Object Detection",
+            use_container_width=True,
+        )
 
-            st.image(
-                cv2.cvtColor(
-                    result.annotated_image,
-                    cv2.COLOR_BGR2RGB,
-                ),
-                caption="YOLO Obstacle Detection",
+        st.write("### Detected Objects")
+
+        if result.detections:
+
+            detection_data = [
+                {
+                    "Object": detection.label,
+                    "Confidence": round(
+                        detection.confidence, 3
+                    ),
+                    "Bounding Box": detection.bounding_box,
+                }
+                for detection in result.detections
+            ]
+
+            st.dataframe(
+                detection_data,
                 use_container_width=True,
             )
-
-            if result.detections:
-                detection_data = [
-                    {
-                        "Object": d.label,
-                        "Confidence": round(d.confidence, 3),
-                        "Bounding Box": str(d.bounding_box),
-                    }
-                    for d in result.detections
-                ]
-
-                st.dataframe(detection_data, use_container_width=True)
-            else:
-                st.info("No objects detected.")
 
         else:
-            st.info("Upload an image and start an image mission.")
+            st.info("No objects detected in the image.")
 
-    elif input_mode == "Video":
+    elif input_mode == "Video" and video_results:
 
-        if video_results:
+        latest = video_results[-1]
 
-            latest = video_results[-1]
-            display_frame = video_latest_detection_frame
+        st.image(
+            cv2.cvtColor(
+                latest.annotated_frame,
+                cv2.COLOR_BGR2RGB,
+            ),
+            caption=f"Video Frame {latest.frame_index}",
+            use_container_width=True,
+        )
 
-            st.image(
-                cv2.cvtColor(
-                    display_frame.annotated_frame,
-                    cv2.COLOR_BGR2RGB,
-                ),
-                caption=(
-                    f"Latest frame containing detections (frame "
-                    f"{display_frame.frame_index})"
-                    if display_frame.detections
-                    else "Latest Processed Video Frame"
-                ),
+        st.metric(
+            "Objects in Current Frame",
+            len(latest.detections),
+        )
+
+        if latest.detections:
+
+            detection_data = [
+                {
+                    "Object": detection.label,
+                    "Confidence": round(
+                        detection.confidence, 3
+                    ),
+                    "Bounding Box": detection.bounding_box,
+                }
+                for detection in latest.detections
+            ]
+
+            st.dataframe(
+                detection_data,
                 use_container_width=True,
             )
 
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Frames Processed", len(video_results))
-            col2.metric("Frames With Detections", video_frames_with_detections)
-            col3.metric("Total Detection Events", video_total_detections)
-            col4.metric("Peak Objects In One Frame", video_peak_detections)
+        else:
+            st.info("No objects detected in the current frame.")
 
-            if display_frame.detections:
-                detection_data = [
-                    {
-                        "Object": d.label,
-                        "Confidence": round(d.confidence, 3),
-                        "Bounding Box": str(d.bounding_box),
-                    }
-                    for d in display_frame.detections
-                ]
-                st.write(f"Detections shown are from frame {display_frame.frame_index}.")
-                st.dataframe(detection_data, use_container_width=True)
-            else:
-                st.warning(
-                    "YOLO returned zero detections in every processed frame. "
-                    "The detection model/configuration must be checked."
+    elif (
+        input_mode == "Webcam"
+        and st.session_state.get("webcam_mission_active", False)
+    ):
+
+        @st.fragment(run_every="1s")
+        def render_live_webcam_perception():
+
+            processor = webcam_ctx.video_processor
+
+            if processor is None:
+                st.info("Waiting for webcam processor to initialize.")
+                return
+
+            status = processor.get_status()
+
+            if status["error"]:
+                st.error(status["error"])
+                return
+
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.metric(
+                    "Frames Processed",
+                    status["frame_index"],
                 )
 
-        else:
-            st.info("Upload a video and start a video mission.")
+            with col2:
+                st.metric(
+                    "Objects in Current Frame",
+                    len(status["detections"]),
+                )
+
+            with col3:
+                st.metric(
+                    "Total Detection Events",
+                    status["total_detections"],
+                )
+
+            st.write("### Current Frame Detection Results")
+
+            if status["detections"]:
+
+                detection_data = [
+                    {
+                        "Object": detection.label,
+                        "Confidence": round(
+                            detection.confidence, 3
+                        ),
+                        "Bounding Box": detection.bounding_box,
+                    }
+                    for detection in status["detections"]
+                ]
+
+                st.dataframe(
+                    detection_data,
+                    use_container_width=True,
+                )
+
+            else:
+                st.info(
+                    "No objects detected in the current webcam frame."
+                )
+
+        render_live_webcam_perception()
 
     else:
-        st.info("Autonomous webcam perception is not yet integrated.")
+        st.info(
+            "Start an Image, Video or Webcam mission "
+            "to view perception results."
+        )
+
 
 
 # --------------------------------------------------
@@ -608,8 +798,57 @@ with tab2:
                 f"Safe stop: {frame.safe_stop}"
             )
 
+    elif input_mode == "Webcam":
+
+        if st.session_state.get("webcam_mission_active", False):
+
+            @st.fragment(run_every="1s")
+            def render_live_webcam_decisions():
+
+                processor = webcam_ctx.video_processor
+
+                if processor is None:
+                    st.info("Waiting for webcam processor to initialize.")
+                    return
+
+                status = processor.get_status()
+
+                if status["error"]:
+                    st.error(
+                        f"Webcam processing error: {status['error']}"
+                    )
+                    return
+
+                st.write("### Live Navigation Decisions")
+
+                if status["goal_reached"]:
+                    st.success("Navigation goal reached.")
+                elif status["safe_stop"]:
+                    st.warning("Agent entered safe-stop mode.")
+                else:
+                    st.info("Agent is processing live webcam frames.")
+
+                st.write(f"**Frames processed:** {status['frame_index']}")
+                st.write(f"**Current drone position:** {status['drone_position']}")
+                st.write(f"**Detected objects:** {len(status['detections'])}")
+                st.write(f"**Total detection events:** {status['total_detections']}")
+                st.write(f"**Occupied grid cells:** {len(status['obstacle_cells'])}")
+                st.write(f"**Current planned path cells:** {len(status['planned_path'] or [])}")
+                st.write(f"**Goal reached:** {status['goal_reached']}")
+                st.write(f"**Emergency detected:** {status['emergency_detected']}")
+                st.write(f"**Safe stop:** {status['safe_stop']}")
+
+                if status["safe_stop_reason"]:
+                    st.warning(status["safe_stop_reason"])
+
+            render_live_webcam_decisions()
+
+        else:
+            st.info("Start a Webcam mission to view live agent decisions.")
+
     else:
-        st.info("Start an Image or Video mission to view agent decisions.")
+        st.info("Start an Image, Video or Webcam mission to view agent decisions.")
+
 
 
 # --------------------------------------------------
@@ -640,15 +879,117 @@ with tab3:
         ]
         goal = None
 
+    elif (
+        input_mode == "Webcam"
+        and st.session_state.get("webcam_mission_active", False)
+    ):
+
+        @st.fragment(run_every="1s")
+        def render_live_webcam_navigation():
+
+            processor = webcam_ctx.video_processor
+
+            if processor is None:
+                st.info("Waiting for webcam processor to initialize.")
+                return
+
+            status = processor.get_status()
+
+            if status["error"]:
+                st.error(
+                    f"Webcam processing error: {status['error']}"
+                )
+                return
+
+            obstacles = status["obstacle_cells"]
+            planned_path = status["planned_path"] or []
+            visited_positions = status["visited_positions"]
+
+            navigation_grid = np.zeros(
+                (grid_size, grid_size)
+            )
+
+            for row, col in obstacles:
+                if (
+                    0 <= row < grid_size
+                    and 0 <= col < grid_size
+                ):
+                    navigation_grid[row, col] = 1
+
+            fig, ax = plt.subplots(figsize=(9, 7))
+
+            ax.imshow(
+                navigation_grid,
+                cmap="Greys",
+                origin="upper",
+            )
+
+            if planned_path:
+                ax.plot(
+                    [p[1] for p in planned_path],
+                    [p[0] for p in planned_path],
+                    "-",
+                    label="Current Planned Path",
+                    linewidth=2,
+                )
+
+            if visited_positions:
+                ax.plot(
+                    [p[1] for p in visited_positions],
+                    [p[0] for p in visited_positions],
+                    "o",
+                    markersize=3,
+                    label="Drone Trajectory",
+                )
+
+                ax.scatter(
+                    visited_positions[0][1],
+                    visited_positions[0][0],
+                    marker="s",
+                    s=100,
+                    label="Start",
+                )
+
+            ax.set_title("AerialMind-X Live Navigation Grid")
+            ax.set_xlabel("Grid Column")
+            ax.set_ylabel("Grid Row")
+            ax.legend()
+            ax.grid(alpha=0.2)
+
+            st.pyplot(fig)
+            plt.close(fig)
+
+            st.write(
+                f"**Current drone position:** "
+                f"{status['drone_position']}"
+            )
+            st.write(
+                f"**Occupied grid cells:** {len(obstacles)}"
+            )
+            st.write(
+                f"**Current planned path cells:** "
+                f"{len(planned_path)}"
+            )
+
+        render_live_webcam_navigation()
+
+        obstacles = None
+
     else:
         obstacles = None
 
     if obstacles is not None:
 
-        navigation_grid = np.zeros((grid_size, grid_size))
+        navigation_grid = np.zeros(
+            (grid_size, grid_size)
+        )
 
         for row, col in obstacles:
-            navigation_grid[row, col] = 1
+            if (
+                0 <= row < grid_size
+                and 0 <= col < grid_size
+            ):
+                navigation_grid[row, col] = 1
 
         fig, ax = plt.subplots(figsize=(9, 7))
 
@@ -711,8 +1052,13 @@ with tab3:
         st.pyplot(fig)
         plt.close(fig)
 
-    else:
-        st.info("Start an Image or Video mission to view navigation.")
+    elif not (
+        input_mode == "Webcam"
+        and st.session_state.get("webcam_mission_active", False)
+    ):
+        st.info(
+            "Start an Image, Video or Webcam mission to view navigation."
+        )
 
 
 # --------------------------------------------------
@@ -737,6 +1083,54 @@ with tab4:
         safe_stop = latest.safe_stop
         reason = latest.safe_stop_reason
 
+    elif (
+        input_mode == "Webcam"
+        and st.session_state.get("webcam_mission_active", False)
+    ):
+
+        @st.fragment(run_every="1s")
+        def render_live_webcam_safety():
+
+            processor = webcam_ctx.video_processor
+
+            if processor is None:
+                st.info("Waiting for webcam processor to initialize.")
+                return
+
+            status = processor.get_status()
+
+            if status["error"]:
+                st.error(
+                    f"Webcam processing error: {status['error']}"
+                )
+                return
+
+            emergency = status["emergency_detected"]
+            safe_stop = status["safe_stop"]
+            reason = status["safe_stop_reason"]
+
+            if emergency:
+                st.error("Emergency detected.")
+
+            elif safe_stop:
+                st.warning("Agent entered safe-stop mode.")
+
+            else:
+                st.success(
+                    "No emergency detected. "
+                    "Safe-stop not activated."
+                )
+
+            st.write(f"**Emergency detected:** {emergency}")
+            st.write(f"**Safe stop:** {safe_stop}")
+            st.write(
+                f"**Safe-stop reason:** {reason or 'None'}"
+            )
+
+        render_live_webcam_safety()
+
+        emergency = None
+
     else:
         emergency = None
 
@@ -749,14 +1143,25 @@ with tab4:
             st.warning("Agent entered safe-stop mode.")
 
         else:
-            st.success("No emergency detected. Safe-stop not activated.")
+            st.success(
+                "No emergency detected. "
+                "Safe-stop not activated."
+            )
 
         st.write(f"**Emergency detected:** {emergency}")
         st.write(f"**Safe stop:** {safe_stop}")
-        st.write(f"**Safe-stop reason:** {reason or 'None'}")
+        st.write(
+            f"**Safe-stop reason:** {reason or 'None'}"
+        )
 
-    else:
-        st.info("Start an Image or Video mission to view safety information.")
+    elif not (
+        input_mode == "Webcam"
+        and st.session_state.get("webcam_mission_active", False)
+    ):
+        st.info(
+            "Start an Image, Video or Webcam mission "
+            "to view safety information."
+        )
 
 
 # --------------------------------------------------
@@ -769,13 +1174,30 @@ with tab5:
 
     if input_mode == "Image" and result is not None:
 
-        execution_time = st.session_state.get("execution_time", 0.0)
+        execution_time = st.session_state.get(
+            "execution_time", 0.0
+        )
 
-        st.metric("Execution Time", f"{execution_time:.3f} seconds")
-        st.metric("Initial Path Length", len(result.initial_path))
-        st.metric("Replanned Path Length", len(result.planned_path))
-        st.metric("Visited Positions", len(result.visited_positions))
-        st.metric("Goal Reached", "Yes" if result.goal_reached else "No")
+        st.metric(
+            "Execution Time",
+            f"{execution_time:.3f} seconds",
+        )
+        st.metric(
+            "Initial Path Length",
+            len(result.initial_path),
+        )
+        st.metric(
+            "Replanned Path Length",
+            len(result.planned_path),
+        )
+        st.metric(
+            "Visited Positions",
+            len(result.visited_positions),
+        )
+        st.metric(
+            "Goal Reached",
+            "Yes" if result.goal_reached else "No",
+        )
 
     elif input_mode == "Video" and video_results:
 
@@ -786,22 +1208,93 @@ with tab5:
         )
 
         route_updates = sum(
-            video_results[i].planned_path != video_results[i - 1].planned_path
+            video_results[i].planned_path
+            != video_results[i - 1].planned_path
             for i in range(1, len(video_results))
         )
 
-        st.metric("Execution Time", f"{execution_time:.3f} seconds")
-        st.metric("Frames Processed", len(video_results))
+        st.metric(
+            "Execution Time",
+            f"{execution_time:.3f} seconds",
+        )
+        st.metric(
+            "Frames Processed",
+            len(video_results),
+        )
         st.metric(
             "Average Processing Time per Frame",
             f"{execution_time / len(video_results):.4f} seconds",
         )
         st.metric("Route Updates", route_updates)
-        st.metric("Latest Path Length", len(latest.planned_path))
+        st.metric(
+            "Latest Path Length",
+            len(latest.planned_path),
+        )
         st.metric(
             "Goal Reached",
             "Yes" if latest.goal_reached else "No",
         )
 
+    elif (
+        input_mode == "Webcam"
+        and st.session_state.get("webcam_mission_active", False)
+    ):
+
+        @st.fragment(run_every="1s")
+        def render_live_webcam_performance():
+
+            processor = webcam_ctx.video_processor
+
+            if processor is None:
+                st.info("Waiting for webcam processor to initialize.")
+                return
+
+            status = processor.get_status()
+
+            if status["error"]:
+                st.error(
+                    f"Webcam processing error: {status['error']}"
+                )
+                return
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.metric(
+                    "Frames Processed",
+                    status["frame_index"],
+                )
+
+                st.metric(
+                    "Total Detection Events",
+                    status["total_detections"],
+                )
+
+                st.metric(
+                    "Route Updates",
+                    status["route_updates"],
+                )
+
+            with col2:
+                st.metric(
+                    "Average Processing Time per Frame",
+                    f"{status['average_processing_time']:.4f} seconds",
+                )
+
+                st.metric(
+                    "Latest Path Length",
+                    len(status["planned_path"] or []),
+                )
+
+                st.metric(
+                    "Goal Reached",
+                    "Yes" if status["goal_reached"] else "No",
+                )
+
+        render_live_webcam_performance()
+
     else:
-        st.info("Start an Image or Video mission to view performance metrics.")
+        st.info(
+            "Start an Image, Video or Webcam mission "
+            "to view performance metrics."
+        )
