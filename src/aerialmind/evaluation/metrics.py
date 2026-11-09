@@ -61,3 +61,53 @@ def calculate_average_planning_time(times_seconds: Sequence[float]) -> float:
         raise ValueError("Planning times must be finite and non-negative.")
 
     return sum(times_seconds) / len(times_seconds)
+
+
+def calculate_average_detection_time(times_seconds: Sequence[float]) -> float:
+    """Calculate average object detection time in seconds."""
+    return calculate_average_planning_time(times_seconds)
+
+
+def calculate_average_replanning_time(times_seconds: Sequence[float]) -> float:
+    """Calculate average dynamic replanning time in seconds."""
+    return calculate_average_planning_time(times_seconds)
+
+
+def calculate_processing_fps(
+    frames_processed: int,
+    elapsed_seconds: float,
+) -> float:
+    """Calculate video processing frames per second."""
+    if frames_processed < 0:
+        raise ValueError("Frames processed must be non-negative.")
+
+    if not math.isfinite(elapsed_seconds) or elapsed_seconds <= 0:
+        raise ValueError("Elapsed time must be finite and positive.")
+
+    return frames_processed / elapsed_seconds
+
+
+def calculate_navigation_efficiency(
+    optimal_path_cost: float,
+    actual_path_cost: float,
+) -> float:
+    """Calculate navigation efficiency as a percentage."""
+    costs = (optimal_path_cost, actual_path_cost)
+
+    if any(not math.isfinite(cost) or cost < 0 for cost in costs):
+        raise ValueError("Path costs must be finite and non-negative.")
+
+    if actual_path_cost <= 0:
+        raise ValueError("Actual path cost must be positive.")
+
+    if optimal_path_cost > actual_path_cost:
+        raise ValueError("Optimal path cost cannot exceed actual path cost.")
+
+    return (optimal_path_cost / actual_path_cost) * 100.0
+
+
+def calculate_average_mission_completion_time(
+    times_seconds: Sequence[float],
+) -> float:
+    """Calculate average mission completion time in seconds."""
+    return calculate_average_planning_time(times_seconds)
