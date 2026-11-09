@@ -153,6 +153,8 @@ class VideoNavigationAgent:
             self.simulator.replan(obstacles)
             replanned = True
 
+        self.previous_obstacles = obstacles.copy()
+
         # Step 5: Move the drone by one simulation step.
         if (
             not self.simulator.reached_goal

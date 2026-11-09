@@ -6,7 +6,7 @@ from aerialmind.perception.vision_grid_mapper import (
 )
 
 
-def test_maps_detection_center_to_grid_cell():
+def test_maps_detection_bounding_box_to_grid_cells():
     detections = [
         Detection("person", 0.95, (40, 20, 60, 40)),
     ]
@@ -19,7 +19,12 @@ def test_maps_detection_center_to_grid_cell():
         grid_cols=5,
     )
 
-    assert obstacles == {(1, 2)}
+    assert obstacles == {
+        (1, 2),
+        (1, 3),
+        (2, 2),
+        (2, 3),
+    }
 
 
 def test_ignores_low_confidence_detections():
