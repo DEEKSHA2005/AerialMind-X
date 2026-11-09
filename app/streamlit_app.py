@@ -871,7 +871,7 @@ with tab3:
 
         latest = video_results[-1]
 
-        obstacles = video_obstacle_cells
+        obstacles = set(latest.obstacles)
         initial_path = []
         planned_path = latest.planned_path
         visited_positions = [
@@ -1273,6 +1273,11 @@ with tab5:
                 st.metric(
                     "Route Updates",
                     status["route_updates"],
+                )
+
+                st.metric(
+                    "Actual Path Changes",
+                    status["path_changes"],
                 )
 
             with col2:

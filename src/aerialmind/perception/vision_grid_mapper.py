@@ -16,7 +16,7 @@ def detections_to_grid_obstacles(
     grid_cols: int,
     confidence_threshold: float = 0.25,
 ) -> set[Coordinate]:
-    """Convert detection bounding-box centers into simulated grid cells.
+    """Convert detection bounding boxes into simulated grid cells.
 
     The mapping assumes the image represents the complete simulated grid
     area. It is an approximation for simulation, not real-world localization.
@@ -47,19 +47,29 @@ def detections_to_grid_obstacles(
         if x1 > x2 or y1 > y2:
             raise ValueError("Detection bounding box coordinates are invalid.")
 
-        center_x = (x1 + x2) / 2
-        center_y = (y1 + y2) / 2
-
-        # Ignore detections whose centers fall outside the image.
-        if not (0 <= center_x < image_width):
+        # Ignore bounding boxes completely outside the image.
+        if (
+            x2 < 0
+            or y2 < 0
+            or x1 >= image_width
+            or y1 >= image_height
+        ):
             continue
 
-        if not (0 <= center_y < image_height):
-            continue
+        # Clip partially visible bounding boxes to image boundaries.
+        x1 = max(0, min(x1, image_width - 1))
+        y1 = max(0, min(y1, image_height - 1))
+        x2 = max(0, min(x2, image_width - 1))
+        y2 = max(0, min(y2, image_height - 1))
+        # Convert the complete bounding box into grid coordinates.
+        start_col = int(x1 * grid_cols / image_width)
+        end_col = int(x2 * grid_cols / image_width)
 
-        col = int(center_x * grid_cols / image_width)
-        row = int(center_y * grid_rows / image_height)
+        start_row = int(y1 * grid_rows / image_height)
+        end_row = int(y2 * grid_rows / image_height)
 
-        obstacles.add((row, col))
+        for row in range(start_row, end_row + 1):
+            for col in range(start_col, end_col + 1):
+                obstacles.add((row, col))
 
     return obstacles

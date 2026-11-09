@@ -32,9 +32,15 @@ class WebcamNavigationProcessor(VideoProcessorBase):
         self.frame_index = 0
         self.total_detections = 0
         self.route_updates = 0
+        self.path_changes = 0
         self.total_processing_time = 0.0
 
-        self.previous_path = None
+        self.previous_path = (
+            list(self.agent.simulator.path)
+            if self.agent.simulator is not None
+            else None
+        )
+        
         self.latest_result = None
         self.error = None
 
@@ -64,14 +70,28 @@ class WebcamNavigationProcessor(VideoProcessorBase):
                 self.total_processing_time += processing_time
                 self.total_detections += len(result.detections)
 
+                current_path = (
+                    list(result.planned_path)
+                    if result.planned_path is not None
+                    else None
+                )
+
                 if result.replanned:
                     self.route_updates += 1
 
+                    if (
+                        current_path is not None
+                        and current_path != self.previous_path
+                    ):
+                        self.path_changes += 1
+
+                if current_path is not None:
+                    self.previous_path = current_path
                 self.visited_positions.append(
                     result.drone_position
                 )
 
-                self.obstacle_cells.update(result.obstacles)
+                self.obstacle_cells = set(result.obstacles)
 
                 self.latest_result = result
                 self.error = None
@@ -99,6 +119,7 @@ class WebcamNavigationProcessor(VideoProcessorBase):
                 "frame_index": self.frame_index,
                 "total_detections": self.total_detections,
                 "route_updates": self.route_updates,
+                "path_changes": self.path_changes,
                 "average_processing_time": (
                     self.total_processing_time / self.frame_index
                     if self.frame_index
