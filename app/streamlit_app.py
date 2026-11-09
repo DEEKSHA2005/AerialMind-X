@@ -7,12 +7,18 @@ from pathlib import Path
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer
 
 from aerialmind.core.autonomous_agent import AutonomousAgent
 from aerialmind.core.video_navigation_agent import VideoNavigationAgent
 from aerialmind.core.webcam_navigation_processor import WebcamNavigationProcessor
+from aerialmind.evaluation.benchmark import (
+    generate_standard_benchmark_scenarios,
+    run_benchmark_suite,
+    summarize_benchmark_results,
+)
 
 # --------------------------------------------------
 # Page Configuration
@@ -580,13 +586,14 @@ st.divider()
 
 st.subheader("Autonomous Agent Monitoring")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
     [
         "Perception",
         "Agent Decisions",
         "Navigation",
         "Safety Monitor",
         "Performance",
+        "Experimental Benchmarking",
     ]
 )
 
@@ -763,8 +770,8 @@ with tab2:
 
         st.write(f"**Detected objects:** {len(result.detections)}")
         st.write(f"**Occupied grid cells:** {len(result.obstacles)}")
-        st.write(f"**Initial path cells:** {len(result.initial_path)}")
-        st.write(f"**Replanned path cells:** {len(result.planned_path)}")
+        st.write(f"**Initial path cells:** {len(result.initial_path or [])}")
+        st.write(f"**Replanned path cells:** {len(result.planned_path or [])}")
         st.write(f"**Final drone position:** {result.final_position}")
 
     elif input_mode == "Video" and video_results:
@@ -784,7 +791,7 @@ with tab2:
         st.write(f"**Total detection events across video:** {video_total_detections}")
         st.write(f"**Frames containing detections:** {video_frames_with_detections}")
         st.write(f"**Grid cells marked as obstacles at any point:** {len(video_obstacle_cells)}")
-        st.write(f"**Current planned path cells:** {len(latest.planned_path)}")
+        st.write(f"**Current planned path cells:** {len(latest.planned_path or [])}")
         st.write(f"**Goal reached:** {latest.goal_reached}")
         st.write(f"**Emergency detected:** {latest.emergency_detected}")
 
@@ -1302,4 +1309,173 @@ with tab5:
         st.info(
             "Start an Image, Video or Webcam mission "
             "to view performance metrics."
+        )
+
+
+# --------------------------------------------------
+# Tab 6 - Experimental Benchmarking
+# --------------------------------------------------
+
+with tab6:
+
+    st.write("### Experimental Benchmarking")
+
+    st.write(
+        "Evaluate autonomous navigation performance across "
+        "different obstacle-density environments."
+    )
+
+    st.info(
+        "This benchmark evaluates static obstacle environments "
+        "using A* path planning and drone simulation."
+    )
+
+    if st.button(
+        "Run Experimental Benchmark",
+        key="run_experimental_benchmark",
+    ):
+
+        with st.spinner("Running benchmark scenarios..."):
+
+            scenarios = generate_standard_benchmark_scenarios(
+                rows=30,
+                cols=30,
+                seed=42,
+            )
+
+            benchmark_results = run_benchmark_suite(scenarios)
+
+            benchmark_summary = summarize_benchmark_results(
+                benchmark_results
+            )
+
+            st.session_state["benchmark_results"] = benchmark_results
+            st.session_state["benchmark_summary"] = benchmark_summary
+
+    if "benchmark_results" in st.session_state:
+
+        results = st.session_state["benchmark_results"]
+        summary = st.session_state["benchmark_summary"]
+
+        st.divider()
+        st.write("### Overall Benchmark Summary")
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        col1.metric(
+            "Total Scenarios",
+            summary.total_scenarios,
+        )
+
+        col2.metric(
+            "Routes Found",
+            summary.route_found_count,
+        )
+
+        col3.metric(
+            "Mission Success Rate",
+            f"{summary.success_rate:.2f}%",
+        )
+
+        col4.metric(
+            "Route Failures",
+            summary.route_failure_count,
+        )
+
+        st.write("### Scenario-wise Results")
+
+        scenario_data = [
+            {
+                "Scenario": result.scenario_name,
+                "Obstacle Density": (
+                    f"{result.obstacle_density * 100:.0f}%"
+                ),
+                "Route Found": (
+                    "Yes" if result.route_found else "No"
+                ),
+                "Mission Success": (
+                    "Yes" if result.mission_success else "No"
+                ),
+                "Initial Path Cost": (
+                    round(result.initial_path_cost, 3)
+                    if result.initial_path_cost is not None
+                    else "N/A"
+                ),
+                "Actual Path Cost": (
+                    round(result.actual_path_cost, 3)
+                    if result.actual_path_cost is not None
+                    else "N/A"
+                ),
+                "Planning Time (s)": round(
+                    result.planning_time_seconds, 6
+                ),
+                "Mission Time (s)": (
+                    round(result.mission_time_seconds, 6)
+                    if result.mission_time_seconds is not None
+                    else "N/A"
+                ),
+                "Steps": result.steps,
+            }
+            for result in results
+        ]
+
+        st.dataframe(
+            scenario_data,
+            use_container_width=True,
+        )
+
+        st.write("### Performance Metrics")
+
+        col1, col2, col3 = st.columns(3)
+
+        col1.metric(
+            "Average Planning Time",
+            f"{summary.average_planning_time:.6f} sec",
+        )
+
+        col2.metric(
+            "Average Mission Time",
+            (
+                f"{summary.average_mission_time:.6f} sec"
+                if summary.average_mission_time is not None
+                else "N/A"
+            ),
+        )
+
+        col3.metric(
+            "Average Initial Path Cost",
+            (
+                f"{summary.average_initial_path_cost:.3f}"
+                if summary.average_initial_path_cost is not None
+                else "N/A"
+            ),
+        )
+
+        st.write("### Obstacle Density vs Planning Time")
+
+        chart_data = {
+            result.scenario_name: result.planning_time_seconds
+            for result in results
+        }
+
+        st.bar_chart(chart_data)
+
+        st.write("### Initial vs Actual Path Cost")
+
+        path_cost_data = [
+            {
+                "Scenario": result.scenario_name,
+                "Initial Path Cost": result.initial_path_cost,
+                "Actual Path Cost": result.actual_path_cost,
+            }
+            for result in results
+        ]
+
+        path_cost_df = pd.DataFrame(path_cost_data).set_index(
+            "Scenario"
+        )
+
+        st.bar_chart(
+            path_cost_df,
+            stack=False,
         )
